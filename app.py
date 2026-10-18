@@ -143,30 +143,37 @@ def tx_display(tx, vehicles, materials):
 
 
 # ----------------------------------------------------------- print slips
-def _print_wrap(body, page_css, height):
-    doc = f"""<html><head><style>
-    @media print {{ @page {{ size: {page_css}; margin: 10mm; }} .np {{ display:none }} }}
+def _print_doc(body, page_css, print_css, autoprint, button_label):
+    """Iframe doc. Only the slip prints; buttons carry .np (no-print)."""
+    auto = "<script>window.onload=function(){setTimeout(function(){window.print()},300)}</script>" if autoprint else ""
+    return f"""<html><head><style>
     body {{ margin:0; background:#fff; color:#000; }}
-    button {{ padding:8px 18px; font-size:14px; cursor:pointer; border-radius:6px;
-              border:1px solid #1e5aa8; background:#1e5aa8; color:#fff; }}
+    button {{ padding:8px 18px; font-size:14px; cursor:pointer; border-radius:6px; font-weight:600;
+              border:1px solid #1e5aa8; background:#1e5aa8; color:#fff; font-family:Arial,sans-serif; }}
+    @media print {{ @page {{ size: {page_css}; margin: 10mm; }} .np {{ display:none !important }} {print_css} }}
     </style></head><body>{body}
-    <div class="np" style="text-align:center;margin-top:16px">
-      <button onclick="window.print()">🖨 Print</button></div></body></html>"""
-    components.html(doc, height=height, scrolling=True)
+    <div class="np" style="text-align:center;margin-top:20px">
+      <button onclick="window.print()">🖨 {button_label}</button></div>{auto}</body></html>"""
 
 
-def gate_pass_slip(vehicle, material, tare, ts, settings):
-    """Gate pass slip: same bordered table as final slip; 2nd/net weight blank."""
-    final_slip(dict(date=fmt_dt(ts), material=material, vehicle=vehicle,
-                    tare=fmt_num(tare), gross="", net=""), settings, "gatePass")
+def gate_pass_slip(vehicle, material, settings, autoprint=False):
+    """Same markup as original GatePassSlip.tsx: Courier, vehicle 25px, material 35px."""
+    size = {"A4": "210mm 297mm", "thermal80": "80mm auto"}.get(settings["gatePass"], "148mm 210mm")
+    body = f"""<div class="slip" style="font-family:'Courier New',Courier,monospace;max-width:360px;margin:0 auto;
+        background:#fff;color:#000;padding:20px 24px;text-align:center">
+      <div style="font-size:14px;letter-spacing:4px;font-weight:bold;margin-bottom:16px">GATE PASS</div>
+      <div style="font-weight:bold;font-size:25px;margin-bottom:12px">{html.escape(vehicle)}</div>
+      <div style="font-weight:bold;font-size:35px">{html.escape(material)}</div></div>"""
+    # original print CSS: gate pass centred on page
+    center = "body{display:flex;align-items:center;justify-content:center;min-height:100vh}"
+    components.html(_print_doc(body, size, center, autoprint, "Print Gate Pass"), height=330)
 
 
-def final_slip(d, settings, paper_key="finalWeigh"):
-    paper = settings.get(paper_key, "A5")
-    if paper == "thermal80":
+def final_slip(d, settings):
+    if settings["finalWeigh"] == "thermal80":
         size = "80mm auto"
     else:
-        size = f"{paper} {settings.get('estimateOrientation', 'portrait')}"
+        size = f"{settings['finalWeigh']} {settings.get('estimateOrientation', 'portrait')}"
     rows = [
         ("DATE", d["date"]),
         ("ITEM", d["material"]),
@@ -175,7 +182,7 @@ def final_slip(d, settings, paper_key="finalWeigh"):
         ("SECOND WEIGHT", d["gross"]),
         ("NET WEIGHT", d["net"]),
     ]
-    cell = "border:1.5px solid #333;padding:8px 14px;font-size:14px;color:#111;"
+    cell = "border:1.5px solid #333;padding:8px 14px;font-size:14px;color:#111;background:#fff;"
     trs = "".join(
         f'<tr><td style="{cell}font-weight:bold;width:45%">{k}</td>'
         f'<td style="{cell}text-align:center;{"font-weight:bold;" if k == "NET WEIGHT" else ""}">{html.escape(str(v))}</td></tr>'
@@ -184,7 +191,7 @@ def final_slip(d, settings, paper_key="finalWeigh"):
     body = f"""<div style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
       <table style="width:100%;border-collapse:collapse;border:1.5px solid #333">
       <tr><td colspan="2" style="{cell}height:40px"></td></tr>{trs}</table></div>"""
-    _print_wrap(body, size, 420)
+    components.html(_print_doc(body, size, "", False, "Print Slip"), height=420, scrolling=True)
 
 
 def ticket_html(tx, veh, mat):
@@ -236,16 +243,25 @@ def _on_vehicle_change():
         st.session_state.gp_tare = float(match["grossWeight"])
 
 
+@st.dialog("Gate Pass")
+def gate_pass_dialog(vehicle, material, autoprint=False, clear_form=False):
+    """Same flow as original: slip in a dialog, Print + Close buttons."""
+    gate_pass_slip(vehicle, material, load("print_settings", {}), autoprint)
+    if clear_form and st.button("✕ Close", use_container_width=True):
+        for k in ("gp_vehicle", "gp_material", "gp_tare"):
+            st.session_state.pop(k, None)
+        st.rerun()
+
+
 def page_gate_pass():
     st.title("Gate Pass")
     st.caption("Issue a gate pass for vehicle entry. Saved as First Weigh In record.")
-    settings = load("print_settings", {})
     vehicles = [v for v in load("vehicles", []) if v["isActive"]]
     materials = [m for m in load("materials", []) if m["isActive"]]
 
     with st.container(border=True):
         st.subheader("Gate Pass Entry")
-        st.caption("Pick a saved vehicle/material or type a new one and press Enter.")
+        st.caption("Saved as First Weigh In. Pick a saved vehicle/material or type a new one and press Enter.")
         vehicle = st.selectbox(
             "Vehicle Number *", [v["plateNumber"] for v in vehicles], index=None,
             accept_new_options=True, placeholder="e.g. KL-1234",
@@ -277,26 +293,21 @@ def page_gate_pass():
                     st.toast(f"New vehicle {plate} saved to management panel")
                 ts = now_ms()
                 txs = load("transactions", [])
-                tx = dict(id=f"WB-{uuid.uuid4().hex[:8].upper()}", vehicleId=f"gp-{ts}",
-                          materialId=f"gp-mat-{ts}", operatorId="gate-operator",
-                          status="first_weighed", firstWeight=tare, firstWeighTime=ts,
-                          remarks=build_gp_remarks(plate, mat, tare), createdAt=ts)
-                txs.append(tx)
+                txs.append(dict(id=f"WB-{uuid.uuid4().hex[:8].upper()}", vehicleId=f"gp-{ts}",
+                                materialId=f"gp-mat-{ts}", operatorId="gate-operator",
+                                status="first_weighed", firstWeight=tare, firstWeighTime=ts,
+                                remarks=build_gp_remarks(plate, mat, tare), createdAt=ts))
                 save("transactions", txs)
-                st.session_state.last_gp = (plate, mat, tare, ts)
-                st.success("Gate pass saved as First Weigh In.")
-
-    if "last_gp" in st.session_state:
-        st.markdown("##### Gate Pass slip")
-        gate_pass_slip(*st.session_state.last_gp, settings)
-        if st.button("Close / New entry"):
-            del st.session_state.last_gp
-            for k in ("gp_vehicle", "gp_material", "gp_tare"):
-                st.session_state.pop(k, None)
-            st.rerun()
+                st.toast("Gate pass saved as First Weigh In.")
+                gate_pass_dialog(plate, mat, autoprint=True, clear_form=True)
 
 
 # --------------------------------------------------------- Transactions
+def update_tx(tx_id, upd):
+    txs = load("transactions", [])
+    save("transactions", [{**t, **upd} if t["id"] == tx_id else t for t in txs])
+
+
 @st.dialog("Edit Transaction")
 def edit_dialog(tx):
     gp = parse_gp(tx.get("remarks"))
@@ -346,11 +357,6 @@ def edit_dialog(tx):
             st.rerun()
 
 
-def update_tx(tx_id, upd):
-    txs = load("transactions", [])
-    save("transactions", [{**t, **upd} if t["id"] == tx_id else t for t in txs])
-
-
 @st.dialog("Delete Transaction")
 def delete_dialog(tx):
     st.write(f"Delete transaction **{tx['id']}**? This cannot be undone.")
@@ -376,11 +382,6 @@ def delete_all_dialog(n):
 @st.dialog("Final Weighing Slip")
 def final_slip_dialog(d):
     final_slip(d, load("print_settings", {}))
-
-
-@st.dialog("Gate Pass")
-def gp_slip_dialog(veh, mat, tare, ts):
-    gate_pass_slip(veh, mat, tare, ts, load("print_settings", {}))
 
 
 @st.dialog("Transaction Details", width="large")
@@ -435,17 +436,17 @@ def page_transactions():
         return
     tx = chunk[sel[0]]["tx"]
     veh, mat = chunk[sel[0]]["Vehicle"], chunk[sel[0]]["Material"]
+    is_gp = parse_gp(tx.get("remarks")) is not None
     a, b, c, d = st.columns(4)
     if a.button("👁 View", use_container_width=True):
-        gp_slip_dialog(veh, mat, tx.get("firstWeight"), tx.get("firstWeighTime") or tx["createdAt"]) if parse_gp(tx.get("remarks")) else ticket_dialog(tx, veh, mat)
+        gate_pass_dialog(veh, mat) if is_gp else ticket_dialog(tx, veh, mat)
     if b.button("🖨 Reprint", use_container_width=True):
-        gp = parse_gp(tx.get("remarks"))
-        if gp and tx["status"] == "completed" and tx.get("secondWeight") is not None:
+        if is_gp and tx["status"] == "completed" and tx.get("secondWeight") is not None:
             final_slip_dialog(dict(date=fmt_dt(tx.get("completedAt")), material=mat, vehicle=veh,
                                    tare=fmt_num(tx.get("firstWeight")), gross=fmt_num(tx["secondWeight"]),
                                    net=fmt_num(tx.get("netWeight"))))
-        elif gp:
-            gp_slip_dialog(veh, mat, tx.get("firstWeight"), tx.get("firstWeighTime") or tx["createdAt"])
+        elif is_gp:
+            gate_pass_dialog(veh, mat, autoprint=True)
         else:
             ticket_dialog(tx, veh, mat)
     if c.button("✏️ Edit", use_container_width=True):
@@ -505,7 +506,7 @@ def confirm_delete(kind, item, label):
         st.rerun()
 
 
-def _entity_tab(kind, key, cols, edit_fn, label_fn, to_df, import_cb=None):
+def _entity_tab(kind, key, edit_fn, label_fn, to_df, import_cb=None):
     items = load(key, [])
     top = st.columns([4, 1, 1] if import_cb else [5, 1])
     top[0].subheader(f"{kind.title()}s ({len(items)})")
@@ -637,13 +638,13 @@ def page_management():
     st.title("Management Panel")
     t1, t2, t3, t4, t5 = st.tabs(["Vehicles", "Materials", "Print Settings", "Backup", "Security"])
     with t1:
-        _entity_tab("vehicle", "vehicles", None, vehicle_dialog, lambda v: v["plateNumber"],
+        _entity_tab("vehicle", "vehicles", vehicle_dialog, lambda v: v["plateNumber"],
                     lambda items: pd.DataFrame([{"Plate Number": v["plateNumber"], "Tare Weight (kg)": v["grossWeight"],
                                                  "Vehicle Type": v["vehicleType"],
                                                  "Status": "Active" if v["isActive"] else "Inactive"} for v in items]),
                     import_vehicles)
     with t2:
-        _entity_tab("material", "materials", None, material_dialog, lambda m: m["name"],
+        _entity_tab("material", "materials", material_dialog, lambda m: m["name"],
                     lambda items: pd.DataFrame([{"Name": m["name"], "Category": m["category"], "Unit": m["unit"],
                                                  "Status": "Active" if m["isActive"] else "Inactive"} for m in items]))
     with t3:
