@@ -515,7 +515,7 @@ def confirm_delete(kind, item, label):
         st.rerun()
 
 
-def _entity_tab(kind, key, edit_fn, label_fn, to_df, import_cb=None):
+def _entity_tab(kind, key, edit_fn, label_fn, to_df, import_cb=None, searchable=False):
     items = load(key, [])
     top = st.columns([4, 1, 1] if import_cb else [5, 1])
     top[0].subheader(f"{kind.title()}s ({len(items)})")
@@ -531,16 +531,25 @@ def _entity_tab(kind, key, edit_fn, label_fn, to_df, import_cb=None):
     if not items:
         st.info(f"No {kind}s yet.")
         return
+    q = ""
+    if searchable:
+        q = st.text_input("Search", placeholder="Search by plate number...", key=f"q_{kind}",
+                          label_visibility="collapsed").strip().lower().replace(" ", "")
+        q = q.replace("-", "")
+        items = [it for it in items if q in label_fn(it).lower().replace(" ", "").replace("-", "")]
+        if not items:
+            st.info("No vehicles match your search.")
+            return
     ncfg = {"Tare Weight (kg)": st.column_config.NumberColumn("Tare Weight (kg)", format="%g")} if kind == "vehicle" else None
     ev = st.dataframe(to_df(items), hide_index=True, use_container_width=True, column_config=ncfg,
-                      on_select="rerun", selection_mode="single-row", key=f"tbl_{kind}")
+                      on_select="rerun", selection_mode="single-row", key=f"tbl_{kind}_{q}")
     if ev.selection.rows:
         it = items[ev.selection.rows[0]]
         a, b, c = st.columns(3)
         if a.button("✏️ Edit", key=f"e_{kind}", use_container_width=True):
             edit_fn(it)
         if b.button("Set " + ("Inactive" if it["isActive"] else "Active"), key=f"t_{kind}", use_container_width=True):
-            save(key, [{**x, "isActive": not x["isActive"]} if x["id"] == it["id"] else x for x in items])
+            save(key, [{**x, "isActive": not x["isActive"]} if x["id"] == it["id"] else x for x in load(key, [])])
             st.rerun()
         if c.button("🗑 Delete", key=f"d_{kind}", use_container_width=True):
             confirm_delete(kind, it, label_fn(it))
@@ -652,7 +661,7 @@ def page_management():
                     lambda items: pd.DataFrame([{"Plate Number": v["plateNumber"], "Tare Weight (kg)": v["grossWeight"],
                                                  "Vehicle Type": v["vehicleType"],
                                                  "Status": "Active" if v["isActive"] else "Inactive"} for v in items]),
-                    import_vehicles)
+                    import_vehicles, searchable=True)
     with t2:
         _entity_tab("material", "materials", material_dialog, lambda m: m["name"],
                     lambda items: pd.DataFrame([{"Name": m["name"], "Category": m["category"], "Unit": m["unit"],
