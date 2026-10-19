@@ -104,8 +104,15 @@ def seed():
 
 
 # ------------------------------------------------------------- GP helpers
+def clean(x):
+    """20000.0 -> 20000, 12.5 -> 12.5 (no trailing .00)."""
+    if isinstance(x, float) and x.is_integer():
+        return int(x)
+    return x
+
+
 def build_gp_remarks(vehicle, material, tare):
-    return f"[GATE PASS] Vehicle: {vehicle} | Material: {material} | Tare: {tare}kg"
+    return f"[GATE PASS] Vehicle: {vehicle} | Material: {material} | Tare: {clean(tare)}kg"
 
 
 def parse_gp(remarks):
@@ -117,13 +124,14 @@ def parse_gp(remarks):
     return dict(
         vehicleNumber=v.group(1).strip() if v else "",
         materialName=m.group(1).strip() if m else "",
-        tareWeight=float(w.group(1)) if w else 0.0,
+        tareWeight=clean(float(w.group(1))) if w else 0,
     )
 
 
 def fmt_num(x):
     if x is None:
         return "—"
+    x = clean(x)
     return f"{x:,.2f}".rstrip("0").rstrip(".") if isinstance(x, float) else f"{x:,}"
 
 
@@ -274,7 +282,7 @@ def page_gate_pass():
             "Material Name *", [m["name"] for m in materials], index=None,
             accept_new_options=True, placeholder="e.g. M SAND, P SAND, DUST", key="gp_material",
         )
-        tare = st.number_input("Tare Weight (kg) *", min_value=0.0, step=0.01, key="gp_tare", format="%.2f")
+        tare = st.number_input("Tare Weight (kg) *", min_value=0.0, step=1.0, key="gp_tare", format="%g")
         if vehicle and not saved:
             st.caption("New vehicle — tare weight will be saved to the management panel")
 
@@ -287,7 +295,7 @@ def page_gate_pass():
                 plate, mat = vehicle.strip().upper(), material.strip()
                 all_v = load("vehicles", [])
                 if not any(v["plateNumber"].upper() == plate for v in all_v):
-                    all_v.append(dict(id=new_id("V"), plateNumber=plate, grossWeight=tare,
+                    all_v.append(dict(id=new_id("V"), plateNumber=plate, grossWeight=clean(tare),
                                       vehicleType="truck", isActive=True, createdAt=now_ms()))
                     save("vehicles", all_v)
                     st.toast(f"New vehicle {plate} saved to management panel")
@@ -295,7 +303,7 @@ def page_gate_pass():
                 txs = load("transactions", [])
                 txs.append(dict(id=f"WB-{uuid.uuid4().hex[:8].upper()}", vehicleId=f"gp-{ts}",
                                 materialId=f"gp-mat-{ts}", operatorId="gate-operator",
-                                status="first_weighed", firstWeight=tare, firstWeighTime=ts,
+                                status="first_weighed", firstWeight=clean(tare), firstWeighTime=ts,
                                 remarks=build_gp_remarks(plate, mat, tare), createdAt=ts))
                 save("transactions", txs)
                 st.toast("Gate pass saved as First Weigh In.")
@@ -315,24 +323,24 @@ def edit_dialog(tx):
         veh = st.text_input("Vehicle Number", gp["vehicleNumber"])
         mat = st.text_input("Material Name", gp["materialName"])
         tare = st.number_input("Tare Weight (kg) — First Weigh",
-                               value=float(tx.get("firstWeight") or gp["tareWeight"]), step=0.01)
+                               value=float(tx.get("firstWeight") or gp["tareWeight"]), step=1.0, format="%g")
         status = st.selectbox("Status", STATUSES, index=STATUSES.index(tx["status"]),
                               format_func=STATUS_LABEL.get)
         gross = None
         if status == "completed":
             with st.container(border=True):
                 st.markdown("**Final Weighing**")
-                gross = st.number_input("Gross Weight (kg) — Final Weigh *", min_value=0.0, step=0.01,
+                gross = st.number_input("Gross Weight (kg) — Final Weigh *", min_value=0.0, step=1.0, format="%g",
                                         value=float(tx.get("secondWeight") or 0.0))
                 if gross > 0 and tare > 0:
-                    st.info(f"Calculated Net Weight: {abs(gross - tare):,.2f} kg")
+                    st.info(f"Calculated Net Weight: {fmt_num(abs(gross - tare))} kg")
                 st.caption("Saving will mark as Completed and show the print slip.")
         label = "Complete & Print" if status == "completed" else "Save Changes"
         if st.button(label, type="primary"):
-            upd = dict(status=status, remarks=build_gp_remarks(veh.strip(), mat.strip(), tare), firstWeight=tare)
+            upd = dict(status=status, remarks=build_gp_remarks(veh.strip(), mat.strip(), tare), firstWeight=clean(tare))
             if status == "completed" and gross and gross > 0:
                 t = now_ms()
-                upd.update(secondWeight=gross, secondWeighTime=t, netWeight=abs(gross - tare), completedAt=t)
+                upd.update(secondWeight=clean(gross), secondWeighTime=t, netWeight=clean(abs(gross - tare)), completedAt=t)
                 st.session_state.slip = dict(
                     date=fmt_dt(t), material=mat.strip(), vehicle=veh.strip(),
                     tare=fmt_num(tare), gross=fmt_num(gross), net=fmt_num(abs(gross - tare)))
@@ -344,14 +352,14 @@ def edit_dialog(tx):
                               format_func=STATUS_LABEL.get)
         sec = None
         if status == "completed":
-            sec = st.number_input("Tare Weight (kg)", min_value=0.0, step=0.01,
+            sec = st.number_input("Tare Weight (kg)", min_value=0.0, step=1.0, format="%g",
                                   value=float(tx.get("secondWeight") or 0.0))
         if st.button("Save Changes", type="primary"):
             upd = dict(status=status, remarks=remarks)
             if status == "completed" and sec:
-                upd["secondWeight"] = sec
+                upd["secondWeight"] = clean(sec)
                 if tx.get("firstWeight") is not None:
-                    upd["netWeight"] = tx["firstWeight"] - sec
+                    upd["netWeight"] = clean(tx["firstWeight"] - sec)
                     upd["completedAt"] = tx.get("completedAt") or now_ms()
             update_tx(tx["id"], upd)
             st.rerun()
@@ -428,7 +436,8 @@ def page_transactions():
         st.info("No transactions found.")
         return
     df = pd.DataFrame([{k: v for k, v in r.items() if k != "tx"} for r in chunk])
-    ev = st.dataframe(df, hide_index=True, use_container_width=True, on_select="rerun",
+    ncfg = {c: st.column_config.NumberColumn(c, format="%g") for c in ("Tare (kg)", "Gross (kg)", "Net (kg)")}
+    ev = st.dataframe(df, hide_index=True, use_container_width=True, column_config=ncfg, on_select="rerun",
                       selection_mode="single-row", key=f"tx_table_{page}_{sf}_{q}")
     sel = ev.selection.rows
     if not sel:
@@ -459,7 +468,7 @@ def page_transactions():
 @st.dialog("Vehicle")
 def vehicle_dialog(v):
     plate = st.text_input("Plate Number", v["plateNumber"] if v else "")
-    wt = st.number_input("Tare Weight (kg)", min_value=0.0, step=1.0, value=float(v["grossWeight"]) if v else 0.0)
+    wt = st.number_input("Tare Weight (kg)", min_value=0.0, step=1.0, format="%g", value=float(v["grossWeight"]) if v else 0.0)
     ty = st.selectbox("Vehicle Type", VEHICLE_TYPES, index=VEHICLE_TYPES.index(v["vehicleType"]) if v else 0)
     if st.button("Save", type="primary"):
         if not plate.strip() or wt <= 0:
@@ -467,9 +476,9 @@ def vehicle_dialog(v):
             return
         vs = load("vehicles", [])
         if v:
-            vs = [{**x, "plateNumber": plate.strip(), "grossWeight": wt, "vehicleType": ty} if x["id"] == v["id"] else x for x in vs]
+            vs = [{**x, "plateNumber": plate.strip(), "grossWeight": clean(wt), "vehicleType": ty} if x["id"] == v["id"] else x for x in vs]
         else:
-            vs.append(dict(id=new_id("V"), plateNumber=plate.strip(), grossWeight=wt, vehicleType=ty,
+            vs.append(dict(id=new_id("V"), plateNumber=plate.strip(), grossWeight=clean(wt), vehicleType=ty,
                            isActive=True, createdAt=now_ms()))
         save("vehicles", vs)
         st.rerun()
@@ -522,7 +531,8 @@ def _entity_tab(kind, key, edit_fn, label_fn, to_df, import_cb=None):
     if not items:
         st.info(f"No {kind}s yet.")
         return
-    ev = st.dataframe(to_df(items), hide_index=True, use_container_width=True,
+    ncfg = {"Tare Weight (kg)": st.column_config.NumberColumn("Tare Weight (kg)", format="%g")} if kind == "vehicle" else None
+    ev = st.dataframe(to_df(items), hide_index=True, use_container_width=True, column_config=ncfg,
                       on_select="rerun", selection_mode="single-row", key=f"tbl_{kind}")
     if ev.selection.rows:
         it = items[ev.selection.rows[0]]
@@ -563,7 +573,7 @@ def import_vehicles(up):
         if not plate or plate == "nan" or w <= 0 or plate.upper() in plates:
             skipped += 1
             continue
-        vs.append(dict(id=new_id("V"), plateNumber=plate, grossWeight=w, vehicleType=ty,
+        vs.append(dict(id=new_id("V"), plateNumber=plate, grossWeight=clean(w), vehicleType=ty,
                        isActive=True, createdAt=now_ms()))
         plates.add(plate.upper())
         ok += 1
